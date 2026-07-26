@@ -1,0 +1,24 @@
+{
+  "name": "tmall-review-console",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "test": "node --test scripts/public-repo-safety.test.mjs scripts/package-windows.test.mjs scripts/correct-imported-reply-history.test.mjs && npm run test -w packages/domain && npm run test -w apps/server && npm run test -w apps/web",
+    "typecheck": "npm run typecheck -w packages/domain && npm run typecheck -w apps/server && npm run typecheck -w apps/web",
+    "build": "npm run build -w packages/domain && npm run build -w apps/server && npm run build -w apps/web",
+    "test:e2e": "playwright test",
+    "package:windows": "npm run build && node scripts/package-windows.mjs",
+    "package:windows:local": "npm run build && node scripts/package-windows.mjs --include-local-state",
+    "data:correct-imported-history": "node scripts/correct-imported-reply-history.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "concurrently": "^10.0.3",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="天猫智能回复">
+  <circle cx="32" cy="32" r="30" fill="#151314"/>
+  <path d="M18 19h28v7H18z" fill="#ef3569"/>
+  <path d="M22 29h20v5H22zM22 38h15v5H22z" fill="#fff"/>
+</svg>

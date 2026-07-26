@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test repository and packaging scripts
+        run: node --test scripts/public-repo-safety.test.mjs scripts/package-windows.test.mjs scripts/correct-imported-reply-history.test.mjs
+
+      - name: Test domain
+        run: npm run test -w packages/domain
+
+      - name: Test server
+        run: npm exec -w apps/server -- vitest run src --exclude src/security/credential-store.test.ts
+
+      - name: Test web console
+        run: npm run test -w apps/web
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
