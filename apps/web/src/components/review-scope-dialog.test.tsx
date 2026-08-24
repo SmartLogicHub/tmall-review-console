@@ -18,6 +18,17 @@ const initialScope: ReviewScopeView = {
   processingMode: "content_unanswered",
 };
 
+function shanghaiDateLabel(now = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value;
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
 function setupDialog() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity }, mutations: { retry: false } } });
   queryClient.setQueryData(["review-scope"], initialScope);
@@ -136,8 +147,9 @@ describe("ReviewScopeDialog", () => {
     const user = userEvent.setup();
     setupDialog();
     await user.click(screen.getByRole("button", { name: "自定义日期" }));
-    await user.click(screen.getByRole("button", { name: "2026-07-16" }));
-    await user.click(screen.getByRole("button", { name: "2026-07-16" }));
+    const today = shanghaiDateLabel();
+    await user.click(screen.getByRole("button", { name: today }));
+    await user.click(screen.getByRole("button", { name: today }));
     expect(screen.getByRole("button", { name: "保存处理范围" })).toBeEnabled();
   });
 
