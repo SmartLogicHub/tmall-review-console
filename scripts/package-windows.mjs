@@ -58,9 +58,20 @@ export function requiredDistributionPaths() {
     "runtime/node.exe",
     "node_modules/tsx/dist/cli.mjs",
     "apps/server/src/index.ts",
+    "apps/server/resources/select-local-chrome.ps1",
     "apps/web/dist/index.html",
     "天猫评论助手.exe",
   ];
+}
+
+export function resolveLocalStateSelection({
+  includeLocalState = false,
+  includeLocalDatabase = false,
+} = {}) {
+  return {
+    includeDatabase: includeLocalState || includeLocalDatabase,
+    includeBrowserProfile: includeLocalState,
+  };
 }
 
 async function exists(path) {
@@ -115,7 +126,8 @@ async function backupLocalBrowserProfile() {
   return true;
 }
 
-export async function packageWindows({ includeLocalState = false } = {}) {
+export async function packageWindows(options = {}) {
+  const localState = resolveLocalStateSelection(options);
   assertInsideWorkspace(releaseRoot);
   await rm(releaseRoot, { recursive: true, force: true });
   await mkdir(releaseRoot, { recursive: true });
@@ -141,8 +153,8 @@ export async function packageWindows({ includeLocalState = false } = {}) {
   await copyTree("packages/domain");
   await cp(resolve(root, "package.json"), resolve(releaseRoot, "package.json"));
   await mkdir(resolve(releaseRoot, "data"), { recursive: true });
-  const includesBrowserProfile = includeLocalState ? await backupLocalBrowserProfile() : false;
-  if (includeLocalState) await backupLocalDatabase();
+  const includesBrowserProfile = localState.includeBrowserProfile ? await backupLocalBrowserProfile() : false;
+  if (localState.includeDatabase) await backupLocalDatabase();
 
   const missing = [];
   for (const path of requiredDistributionPaths()) {
@@ -155,7 +167,8 @@ export async function packageWindows({ includeLocalState = false } = {}) {
     version: "0.1.0",
     builtAt: new Date().toISOString(),
     portable: true,
-    includesLocalState: includeLocalState,
+    includesLocalState: localState.includeDatabase || includesBrowserProfile,
+    includesLocalDatabase: localState.includeDatabase,
     includesBrowserProfile,
   };
   await writeFile(resolve(releaseRoot, "release.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
@@ -164,7 +177,8 @@ export async function packageWindows({ includeLocalState = false } = {}) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const includeLocalState = process.argv.includes("--include-local-state");
-  packageWindows({ includeLocalState }).then((path) => {
+  const includeLocalDatabase = process.argv.includes("--include-local-database");
+  packageWindows({ includeLocalState, includeLocalDatabase }).then((path) => {
     process.stdout.write(`Windows release created at ${path}\n`);
   }).catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);

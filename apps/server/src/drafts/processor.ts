@@ -24,8 +24,12 @@ import type {
 } from "../storage/repositories";
 import { ReviewActionConflictError } from "../submission/review-action-gate";
 import type { TmallReviewSnapshot } from "../tmall/review-reader";
+import { hasUnapprovedAfterSalesCommitment } from "../submission/template-trust";
 import {
   applyNoUseExperienceGuard,
+  applyNeutralLoudnessGuard,
+  hasOnlyEmptyPlatformFieldLabels,
+  isNeutralWearingCategoryName,
   refineFallbackCategory,
   selectReplyTemplate,
 } from "./template-selection";
@@ -46,6 +50,7 @@ export type DraftProcessOutcome =
   | "completed"
   | "retry_wait"
   | "circuit_breaker"
+  | "failed_continue"
   | "manual_action_required"
   | "paused"
   | "skipped";
@@ -92,6 +97,16 @@ interface ConfigurationFailure {
   message: string;
 }
 
+type DraftProcessingFailureStage =
+  | "读取评价"
+  | "商品策略判断"
+  | "话术目录读取"
+  | "评价分类"
+  | "投诉资格核对"
+  | "话术选择"
+  | "分类与话术结果保存"
+  | "商品信息修正与草稿保存";
+
 class DraftConfigurationError extends Error {
   readonly code: string;
 
@@ -124,7 +139,8 @@ function hasExplicitNegativeValueComparison(review: string): boolean {
 
 function hasExplicitCelebrityReference(review: string): boolean {
   const text = review.normalize("NFKC").replace(/\s+/gu, "");
-  return /(?:明星|代言人?|偶像|爱豆|艺人|演员|歌手|男团|女团|博主|网红|主播|达人|粉丝|饭圈|应援)/u.test(text)
+  return /(?:明星|代言人?|偶像|爱豆|艺人|男团|女团|博主|网红|主播|达人|粉丝|饭圈|应援)/u.test(text)
+    || /(?:演员|歌手).{0,12}(?:代言|同款|推荐|粉丝|应援)|(?:代言|同款|推荐|粉丝|应援).{0,12}(?:演员|歌手)/u.test(text)
     || /(?:同款|推荐).{0,12}(?:老师|哥哥|姐姐)/u.test(text);
 }
 
@@ -287,6 +303,10 @@ export class DraftProcessor {
             const held = this.#requireRecord(existing.id);
             result.processed += 1;
             result.items.push({ id: held.id, state: held.state, outcome: "completed" });
+          } else if (this.#replies.canSubmitObservedReadyDraft(existing.id)) {
+            const ready = this.#requireRecord(existing.id);
+            result.processed += 1;
+            result.items.push({ id: ready.id, state: ready.state, outcome: "completed" });
           } else {
             result.skipped += 1;
             result.items.push({ id: existing.id, state: existing.state, outcome: "skipped", skipped: true });
@@ -400,6 +420,7 @@ export class DraftProcessor {
     onProgress?: (message: string) => void,
     control: ProcessControl = {},
   ): Promise<DraftProcessItem> {
+    let failureStage: DraftProcessingFailureStage = "读取评价";
     try {
       let record = this.#requireRecord(id);
       let listedUnknownPositiveAlreadyAdjudicated = false;
@@ -416,6 +437,7 @@ export class DraftProcessor {
       // A safe failed-complaint recovery already completed this gate before
       // the earlier complaint call, so it proceeds directly to classification.
       if (record.aiCheckpointStage !== "template_selected" && !control.complaintAnalysisResume) {
+        failureStage = "商品策略判断";
         if (control.shouldContinue && !control.shouldContinue()) {
           return { id, state: record.state, outcome: "paused" };
         }
@@ -457,14 +479,17 @@ export class DraftProcessor {
       }
 
       if (record.aiCheckpointStage === "template_selected") {
+        failureStage = "商品信息修正与草稿保存";
         return await this.#rewriteFromCheckpoint(record, control, onProgress);
       }
+      failureStage = "话术目录读取";
       const { good, bad, goodVersionId, badVersionId, categories } = this.#validatedTemplateCatalog();
 
       if (control.shouldContinue && !control.shouldContinue()) {
         return { id, state: record.state, outcome: "paused" };
       }
       onProgress?.("正在判断评论分类");
+      failureStage = "评价分类";
       const classified = await this.#attemptStage("classification", record.id, async () => {
         const modelClassification = await this.#ai.classifyReview({
           review: record.review,
@@ -478,6 +503,20 @@ export class DraftProcessor {
           record.review,
           FIXED_TEMPLATE_SCHEMAS.good.fallbackCategory,
         );
+        classification = applyNeutralLoudnessGuard(
+          classification,
+          record.review,
+          FIXED_TEMPLATE_SCHEMAS.good.fallbackCategory,
+        );
+        if (hasOnlyEmptyPlatformFieldLabels(record.review)) {
+          classification = {
+            library: "good",
+            category: FIXED_TEMPLATE_SCHEMAS.good.fallbackCategory,
+            confidence: Math.max(classification.confidence, 0.98),
+            reason: "评价仅包含平台字段名且未填写具体内容，按通用整体好评回复。",
+            needsAttention: false,
+          };
+        }
         const primarySentiment = {
           sentiment: classification.library === "good" ? "positive" as const : "negative" as const,
           confidence: classification.confidence,
@@ -518,10 +557,13 @@ export class DraftProcessor {
           categories,
         });
         if (refinedCategory !== classification.category) {
+          const refinedReason = isNeutralWearingCategoryName(refinedCategory)
+            ? "商品标题未明确佩戴类型，评价属于佩戴问题，使用中性佩戴话术。"
+            : `${classification.reason}；具体评价维度命中${refinedCategory}`.slice(0, 100);
           classification = {
             ...classification,
             category: refinedCategory,
-            reason: `${classification.reason}；具体评价维度命中${refinedCategory}`.slice(0, 100),
+            reason: refinedReason,
           };
         }
         const libraryCategories = classification.library === "good" ? good : bad;
@@ -574,6 +616,7 @@ export class DraftProcessor {
           return { id, state: record.state, outcome: "paused" };
         }
         onProgress?.("正在核对评价投诉资格");
+        failureStage = "投诉资格核对";
         const complaintDecision = await this.#complaintPolicy.evaluate({
           ...record,
           sentimentLabel: selected.classification.library === "good" ? "positive" : "negative",
@@ -607,6 +650,7 @@ export class DraftProcessor {
       }
 
       onProgress?.("正在选择回复话术");
+      failureStage = "话术选择";
       if (selected.replies.length === 0) throw this.#templateConfigurationError();
       let picked;
       try {
@@ -621,6 +665,7 @@ export class DraftProcessor {
         throw this.#templateConfigurationError();
       }
       const checkpointAt = this.#operationAt(control);
+      failureStage = "分类与话术结果保存";
       record = this.#replies.saveAiCheckpoint(id, {
         library: selected.classification.library,
         primaryCategory: selected.primaryCategory,
@@ -637,6 +682,7 @@ export class DraftProcessor {
       if (control.shouldContinue && !control.shouldContinue()) {
         return { id, state: record.state, outcome: "paused" };
       }
+      failureStage = "商品信息修正与草稿保存";
       return await this.#rewriteFromCheckpoint(record, control, onProgress);
     } catch (error) {
       if (error instanceof ReviewActionConflictError) throw error;
@@ -645,12 +691,12 @@ export class DraftProcessor {
       const failed = this.#replies.fail(
         id,
         "DRAFT_PROCESSING_FAILED",
-        "回复草稿生成失败，请稍后重试",
+        `回复草稿生成失败（${failureStage}），已跳过本条并继续，下一轮页面仍可回复时将重试`,
         this.#writeOptions(control, this.#operationAt(control)),
       );
       const current = this.#requireRecord(id);
       return failed
-        ? { id, state: current.state, outcome: "manual_action_required" }
+        ? { id, state: current.state, outcome: "failed_continue" }
         : { id, state: current.state, outcome: "skipped", skipped: true };
     }
   }
@@ -941,7 +987,7 @@ export class DraftProcessor {
     // with the content classifier must not block an otherwise safe reply.
     if (confidence < 0.65) reasons.push("AI 分类置信度较低");
     if (record.product === "商品名称未识别") reasons.push("商品名称未能从页面中识别");
-    if (/退货|退款|赔偿|补偿|无条件|保证给您/u.test(finalReply)) {
+    if (hasUnapprovedAfterSalesCommitment(record.originalTemplate, finalReply)) {
       reasons.push("草稿包含需要人工确认的售后承诺词");
     }
     return reasons;

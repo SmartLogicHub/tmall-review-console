@@ -47,6 +47,27 @@ describe("Patchright Tmall browser runtime", () => {
     expect(calls).toBe(2);
   });
 
+  it("uses an explicitly selected chrome.exe instead of the standard Chrome channel", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+
+    await launchTmallBrowserContext({
+      profileDirectory: "G:\\tmall\\browser-profile",
+      headless: false,
+      executablePath: "D:\\Portable Chrome\\chrome.exe",
+      launchPersistentContext: async (_directory, options) => {
+        calls.push(options as Record<string, unknown>);
+        return { pages: () => [] } as never;
+      },
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      executablePath: "D:\\Portable Chrome\\chrome.exe",
+      headless: false,
+    });
+    expect(calls[0]).not.toHaveProperty("channel");
+  });
+
   it("converts a raw Chrome launch failure into a safe and actionable error", async () => {
     const launch = launchTmallBrowserContext({
       profileDirectory: "C:\\private\\copied-profile",
@@ -58,7 +79,7 @@ describe("Patchright Tmall browser runtime", () => {
 
     await expect(launch).rejects.toEqual(expect.objectContaining({
       name: "TmallBrowserLaunchError",
-      message: "专用淘宝浏览器启动失败。请确认已安装 Chrome，并关闭影刀RPA等正在调试 Chrome 的工具后重试",
+      message: "专用淘宝浏览器启动失败。请确认已安装 Chrome，关闭 Chrome、影刀/RPA 等占用程序；换电脑使用时请清除旧浏览器资料后重试",
     }));
     await expect(launch).rejects.toBeInstanceOf(TmallBrowserLaunchError);
     await expect(launch).rejects.not.toHaveProperty("message", expect.stringMatching(/private|Bearer|secret-token/iu));

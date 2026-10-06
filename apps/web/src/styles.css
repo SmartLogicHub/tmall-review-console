@@ -851,6 +851,16 @@ html { overflow-y: scroll; }
 .complaint-failure > div { display: grid; gap: 4px; }
 .complaint-failure span { color: var(--muted); font-size: 11px; line-height: 1.6; }
 .complaint-empty { min-height: 280px; }
+.browser-runtime-state { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 11px; align-items: center; margin: 14px 0 4px; padding: 12px; border: 1px solid #e9e2e5; border-radius: 13px; background: #faf8f9; }
+.browser-runtime-state.is-ready { border-color: #d7e7dc; background: #f6faf7; }
+.browser-runtime-state.is-missing { border-color: #efdcb6; background: #fffaf0; }
+.browser-runtime-icon { display: grid; place-items: center; width: 38px; height: 38px; border: 1px solid #e7dfe2; border-radius: 11px; color: #8f4b62; background: #fff; }
+.browser-runtime-copy { display: grid; gap: 4px; min-width: 0; }
+.browser-runtime-copy strong { font-size: 12px; line-height: 1.45; }
+.browser-runtime-copy span { color: var(--muted); font-size: 10px; line-height: 1.55; }
+.browser-runtime-copy code { overflow: hidden; color: #6f676a; font: 500 10px/1.5 Manrope, "Microsoft YaHei", sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.browser-runtime-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.browser-runtime-actions .button { min-height: 35px; padding-inline: 11px; font-size: 10px; }
 
 @media (max-width: 900px) {
   .complaints-layout.has-detail { grid-template-columns: 1fr; }
@@ -859,6 +869,9 @@ html { overflow-y: scroll; }
   .manual-product-row { grid-template-columns: minmax(0, 1fr) auto; gap: 7px 12px; padding: 13px 0; }
   .manual-source-tags, .manual-last-match { grid-column: 1; }
   .manual-remove-action { grid-column: 2; grid-row: 1 / 4; align-self: center; }
+  .browser-runtime-state { grid-template-columns: 38px minmax(0, 1fr); }
+  .browser-runtime-actions { grid-column: 1 / -1; justify-content: stretch; }
+  .browser-runtime-actions .button { flex: 1 1 180px; }
 }
 
 @media (max-width: 620px) {

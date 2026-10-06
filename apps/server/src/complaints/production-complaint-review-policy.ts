@@ -64,8 +64,16 @@ class CandidateScreenedComplaintReviewPolicy implements ComplaintReviewPolicy {
       "未命中投诉候选筛选，按普通评价处理",
     );
     if (released) return { action: "reply", caseId: released.id, caseState: "no_complaint" };
+    const releasedCandidate = this.complaints.releaseUnsubmittedCandidateAsNoComplaint(
+      existing.id,
+      "当前页面评价未命中投诉候选，且旧投诉意向从未点击提交，按普通评价处理",
+    );
+    if (releasedCandidate) {
+      return { action: "reply", caseId: releasedCandidate.id, caseState: "no_complaint" };
+    }
     // A validated type, an attempt, or any submission state remains owned by
-    // the complaint workflow even if later page metadata looks ordinary.
+    // the complaint workflow only after the platform submit boundary has been
+    // crossed or the platform exposes an explicit complaint state.
     return this.delegate.evaluate(draft, control);
   }
 }

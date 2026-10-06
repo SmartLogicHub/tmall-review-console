@@ -1952,7 +1952,7 @@ export class ReplyRepository {
       const reasons = input.needsAttention ? ["AI 建议人工检查分类"] : [];
       const result = this.database.prepare(`
         UPDATE reply_drafts
-        SET library = ?, primary_category = ?, category = ?,
+        SET sentiment_label = ?, library = ?, primary_category = ?, category = ?,
             classification_confidence = ?, classification_reason = ?,
             template_version_id = ?, template_sequence = ?, original_template = ?,
             attention_reasons_json = ?, ai_checkpoint_stage = 'template_selected',
@@ -1975,6 +1975,7 @@ export class ReplyRepository {
           )
           ${AI_RETRY_NO_ACTION_CONFLICT_SQL}
       `).run(
+        input.library === "good" ? "positive" : "negative",
         input.library,
         input.primaryCategory,
         input.category,
@@ -2815,6 +2816,50 @@ export class ReplyRepository {
       `).run(now, id, current.state);
       return changed.changes === 1;
     }).immediate();
+  }
+
+  /**
+   * A live reply control may resume an already generated draft only when no
+   * local action crossed the platform submit boundary.  Validation failures
+   * and other pre-click failures are safe to retry; active locks, tombstones,
+   * sent/uncertain attempts and any recorded submit timestamp remain protected.
+   */
+  canSubmitObservedReadyDraft(id: string): boolean {
+    const current = this.get(id);
+    if (!current || !["read_only_ready", "needs_attention"].includes(current.state)) return false;
+    const retryableFailure = this.database.prepare(`
+      SELECT 1
+      FROM reply_attempts
+      WHERE source_key = ? AND state = 'failed'
+        AND (
+          submitted_at IS NULL
+          OR error_code = 'MANUALLY_CONFIRMED_NOT_SENT'
+        )
+      LIMIT 1
+    `).get(current.sourceKey);
+    if (!retryableFailure) return false;
+    const protectedAction = this.database.prepare(`
+      SELECT 1
+      FROM review_action_locks
+      WHERE store_id = 'primary' AND source_key = ?
+      UNION ALL
+      SELECT 1
+      FROM review_action_tombstones
+      WHERE store_id = 'primary' AND source_key = ?
+      UNION ALL
+      SELECT 1
+      FROM reply_attempts
+      WHERE source_key = ?
+        AND (
+          state IN ('pending','submitting','sent','submission_uncertain')
+          OR (
+            submitted_at IS NOT NULL
+            AND COALESCE(error_code, '') != 'MANUALLY_CONFIRMED_NOT_SENT'
+          )
+        )
+      LIMIT 1
+    `).get(current.sourceKey, current.sourceKey, current.sourceKey);
+    return !protectedAction;
   }
 
   get(id: string): PersistedReplyDraft | null {

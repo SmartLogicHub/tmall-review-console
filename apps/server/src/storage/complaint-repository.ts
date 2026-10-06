@@ -423,6 +423,68 @@ export class ComplaintRepository {
     }).immediate();
   }
 
+  /**
+   * Releases a legacy validated complaint intent when the current live review
+   * no longer passes complaint screening and the browser submit click never
+   * started.  The candidate and failed intent remain as audit evidence.
+   */
+  releaseUnsubmittedCandidateAsNoComplaint(caseId: string, reason: string): ComplaintCaseRecord | null {
+    if (!reason.trim() || Array.from(reason).length > 200) throw new Error("投诉候选筛选结果无效");
+    return this.database.transaction(() => {
+      const current = this.get(caseId);
+      if (!current) throw new Error("投诉记录不存在");
+      if (!["prepared", "manual_action_required", "failed", "retry_wait"].includes(current.state)
+        || current.complaintType === null
+        || current.factCode === null
+        || current.description === null) return null;
+      const attempt = this.database.prepare(`
+        SELECT state, click_started_at, click_finished_at, platform_case_id, platform_detail_url
+        FROM complaint_attempts
+        WHERE complaint_case_id = ?
+      `).get(caseId) as {
+        state: string;
+        click_started_at: string | null;
+        click_finished_at: string | null;
+        platform_case_id: string | null;
+        platform_detail_url: string | null;
+      } | undefined;
+      if (!attempt
+        || !["intent_saved", "failed"].includes(attempt.state)
+        || attempt.click_started_at !== null
+        || attempt.click_finished_at !== null
+        || attempt.platform_case_id !== null
+        || attempt.platform_detail_url !== null) return null;
+      this.assertFrozenComplaintLock(current);
+      const now = new Date().toISOString();
+      const safeReason = sanitizeSafeText(reason);
+      const attemptUpdate = this.database.prepare(`
+        UPDATE complaint_attempts
+        SET state = 'failed', error_code = 'screened_out_by_live_review',
+            error_message = ?, result_observed_at = ?, updated_at = ?
+        WHERE complaint_case_id = ? AND state IN ('intent_saved','failed')
+          AND click_started_at IS NULL AND click_finished_at IS NULL
+          AND platform_case_id IS NULL AND platform_detail_url IS NULL
+      `).run(safeReason, now, now, current.id);
+      if (attemptUpdate.changes !== 1) throw new Error("投诉准备检查点已发生变化");
+      const changed = this.database.prepare(`
+        UPDATE complaint_cases
+        SET state = 'no_complaint', confidence = 100, reason = ?,
+            error_code = NULL, updated_at = ?
+        WHERE id = ? AND state = ? AND action_lock_version = ?
+      `).run(safeReason, now, current.id, current.state, current.actionLockVersion);
+      if (changed.changes !== 1) throw new Error("投诉状态已发生变化");
+      const lock = this.database.prepare(`
+        UPDATE review_action_locks
+        SET action_kind = 'reply', lock_version = lock_version + 1, updated_at = ?
+        WHERE store_id = ? AND source_key = ?
+          AND action_kind = 'complaint' AND lock_version = ?
+      `).run(now, current.storeId, current.sourceKey, current.actionLockVersion);
+      if (lock.changes !== 1) throw new Error("投诉动作锁已发生变化");
+      this.insertEvent(current.id, "candidate_released_by_live_screening", { confidence: 100 }, now);
+      return this.get(current.id)!;
+    }).immediate();
+  }
+
   recoverInterruptedAttempts(): number {
     return this.database.transaction(() => {
       const rows = this.database.prepare(`SELECT c.id FROM complaint_cases c JOIN complaint_attempts a ON a.complaint_case_id = c.id WHERE a.state IN ('click_started','click_finished') AND c.state = 'submitting'`).all() as Array<{ id: string }>;

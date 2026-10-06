@@ -1,6 +1,7 @@
 import type { ReplyAttemptRepository, ReplyAttemptState, ReplyRepository } from "../storage/repositories";
 import { TmallReviewPageStateError, type TmallReviewSnapshot } from "../tmall/review-reader";
 import { ReviewActionConflictError } from "./review-action-gate";
+import { hasUnapprovedAfterSalesCommitment } from "./template-trust";
 
 export interface SubmissionResult {
   outcome: "skipped" | "sent" | "failed" | "uncertain";
@@ -100,7 +101,9 @@ export class SubmissionService {
     if (draft.product === "商品名称未识别") return "商品名称无法确认";
     const reply = draft.finalReply.trim();
     if (reply.length < 10 || reply.length > 1000) return "回复长度不符合要求";
-    if (/退款|退货|赔偿|补偿|无条件|保证给您|承诺给您/u.test(reply)) return "回复包含未经允许的售后承诺";
+    if (hasUnapprovedAfterSalesCommitment(draft.originalTemplate, reply)) {
+      return "回复包含未经允许的售后承诺";
+    }
     if (draft.unsupportedClaims.length > 0) return `回复包含未经模板支持的商品描述：“${draft.unsupportedClaims[0]!.slice(0, 80)}”`;
     const currentProduct = draft.product.toLowerCase();
     const finalReply = reply.toLowerCase();

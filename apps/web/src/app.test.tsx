@@ -63,6 +63,14 @@ let manualProducts: Array<{ id: string; itemId: string | null; title: string; so
 let tmallConfigured = false;
 let tmallAuthState = "not_configured";
 let tmallAuthMessage: string | null = null;
+let tmallBrowserStatus = {
+  source: "standard" as "standard" | "custom" | "missing",
+  available: true,
+  executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" as string | null,
+  customPath: null as string | null,
+  customPathValid: false,
+};
+let tmallBrowserSelectedPath: string | null = null;
 let tmallContinueRejectOnce = false;
 let automationControlFailure: Error | null = null;
 let settingsMutationFailure: Error | null = null;
@@ -88,6 +96,14 @@ beforeEach(() => {
   tmallConfigured = false;
   tmallAuthState = "not_configured";
   tmallAuthMessage = null;
+  tmallBrowserStatus = {
+    source: "standard",
+    available: true,
+    executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    customPath: null,
+    customPathValid: false,
+  };
+  tmallBrowserSelectedPath = null;
   tmallContinueRejectOnce = false;
   automationControlFailure = null;
   settingsMutationFailure = null;
@@ -216,6 +232,28 @@ beforeEach(() => {
       });
       if (url.endsWith("/api/tmall-auth/status")) {
         return json({ state: tmallConfigured ? tmallAuthState === "not_configured" ? "configured" : tmallAuthState : "not_configured", configured: tmallConfigured, maskedAccount: tmallConfigured ? "te***nt" : null, autoReloginEnabled: tmallConfigured, lastFailure: tmallAuthMessage });
+      }
+      if (url.endsWith("/api/tmall-browser/status")) return json(tmallBrowserStatus);
+      if (url.endsWith("/api/tmall-browser/select") && init?.method === "POST") {
+        if (!tmallBrowserSelectedPath) return json({ cancelled: true, ...tmallBrowserStatus });
+        tmallBrowserStatus = {
+          source: "custom",
+          available: true,
+          executablePath: tmallBrowserSelectedPath,
+          customPath: tmallBrowserSelectedPath,
+          customPathValid: true,
+        };
+        return json({ cancelled: false, ...tmallBrowserStatus });
+      }
+      if (url.endsWith("/api/tmall-browser/custom-path") && init?.method === "DELETE") {
+        tmallBrowserStatus = {
+          source: "standard",
+          available: true,
+          executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+          customPath: null,
+          customPathValid: false,
+        };
+        return json(tmallBrowserStatus);
       }
       return json({ error: "not_found" }, 404);
     }),
@@ -617,6 +655,60 @@ describe("merchant console", () => {
       expect(window.localStorage.length).toBe(0);
       expect(window.sessionStorage.length).toBe(0);
     });
+  });
+
+  it("shows saved Tmall credentials as awaiting page verification instead of authenticated", async () => {
+    tmallConfigured = true;
+    tmallAuthState = "configured";
+    window.history.pushState({}, "", "/settings");
+    render(<App />);
+
+    expect(await screen.findByText("账号已保存，尚未完成淘宝页面验证。")).toBeVisible();
+    expect(screen.queryByText("登录已验证，可以开始处理评论。")).not.toBeInTheDocument();
+  });
+
+  it("guides the user to select and verify Chrome when automatic detection fails", async () => {
+    tmallBrowserStatus = {
+      source: "missing",
+      available: false,
+      executablePath: null,
+      customPath: null,
+      customPathValid: false,
+    };
+    tmallBrowserSelectedPath = "D:\\Portable Chrome\\chrome.exe";
+    const user = userEvent.setup();
+    window.history.pushState({}, "", "/settings");
+    render(<App />);
+
+    expect(await screen.findByText("未找到可用的 Google Chrome，请选择 chrome.exe 或 chromex.exe。")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "选择并验证 Chrome" }));
+
+    expect(await screen.findByText("已使用自定义 Chrome")).toBeVisible();
+    expect(screen.getByText("D:\\Portable Chrome\\chrome.exe")).toBeVisible();
+    expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
+      String(url).endsWith("/api/tmall-browser/select") && init?.method === "POST",
+    )).toBe(true);
+  });
+
+  it("lets the user return from a custom Chrome path to automatic detection", async () => {
+    tmallBrowserStatus = {
+      source: "custom",
+      available: true,
+      executablePath: "D:\\Portable Chrome\\chrome.exe",
+      customPath: "D:\\Portable Chrome\\chrome.exe",
+      customPathValid: true,
+    };
+    const user = userEvent.setup();
+    window.history.pushState({}, "", "/settings");
+    render(<App />);
+
+    expect(await screen.findByText("已使用自定义 Chrome")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "恢复自动识别" }));
+
+    expect(await screen.findByText("已自动找到 Google Chrome")).toBeVisible();
+    expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
+      String(url).endsWith("/api/tmall-browser/custom-path") && init?.method === "DELETE",
+    )).toBe(true);
   });
 
   it("shows a non-blocking Feishu warning when an active template remains usable after sync failure", async () => {

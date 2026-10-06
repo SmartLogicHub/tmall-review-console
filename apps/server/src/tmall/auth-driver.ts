@@ -263,6 +263,7 @@ interface PlaywrightTmallAuthDriverOptions {
   profileDirectory: string;
   headless?: boolean;
   humanActions?: TmallHumanActions;
+  browserExecutablePath?: () => string | null;
 }
 
 interface TmallReviewTargetHint {
@@ -1542,6 +1543,7 @@ export class PlaywrightTmallAuthDriver implements TmallAuthDriver {
   readonly #profileDirectory: string;
   readonly #headless: boolean;
   readonly #humanActions: TmallHumanActions;
+  readonly #browserExecutablePath: () => string | null;
   #context: BrowserContext | null = null;
   #authenticationPage: Page | null = null;
   #locatorProvider: ((operationKey: string) => { strategy: string; selector: string } | null) | null = null;
@@ -1562,6 +1564,7 @@ export class PlaywrightTmallAuthDriver implements TmallAuthDriver {
     }
     this.#headless = options.headless ?? false;
     this.#humanActions = options.humanActions ?? createHumanActions();
+    this.#browserExecutablePath = options.browserExecutablePath ?? (() => null);
   }
 
   setLocatorProvider(provider: (operationKey: string) => { strategy: string; selector: string } | null): void {
@@ -1583,6 +1586,7 @@ export class PlaywrightTmallAuthDriver implements TmallAuthDriver {
       return launchTmallBrowserContext({
         profileDirectory: this.#profileDirectory,
         headless: this.#headless,
+        executablePath: this.#browserExecutablePath(),
       });
     }, { allowLaunch: this.#launchAllowed });
     if (acquired.context !== previousContext) {

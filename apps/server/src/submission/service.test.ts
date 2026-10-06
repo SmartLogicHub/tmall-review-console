@@ -232,6 +232,107 @@ describe("safe reply submission", () => {
     database.close();
   });
 
+  it("allows after-sales wording that is preserved from the merchant-approved original template", async () => {
+    const database = openDatabase(":memory:");
+    runMigrations(database);
+    const replies = new ReplyRepository(database);
+    const attempts = new ReplyAttemptRepository(database);
+    const sourceKey = "tmall:approved-after-sales-template";
+    const template = "很抱歉没有达到您的预期，如符合平台售后规则，我们支持全额退款退货，请联系在线客服协助处理。";
+    const { id } = replies.discover({
+      sourceKey,
+      orderId: null,
+      review: "这个价格不值",
+      product: "漫步者耳机",
+      reviewedAt: null,
+      sentimentLabel: "negative",
+      itemId: null,
+      reviewPhase: "initial",
+    });
+    replies.saveClassification(id, {
+      library: "bad",
+      primaryCategory: "性价比",
+      category: "性价比一般",
+      confidence: 0.95,
+      reason: "明确表达价格不值",
+      needsAttention: false,
+    });
+    database.prepare("UPDATE reply_drafts SET original_template = ?, state = 'rewriting' WHERE id = ?").run(template, id);
+    replies.complete(id, {
+      finalReply: template,
+      productAdjusted: false,
+      needsAttention: false,
+      notes: "保持商家批准话术原文",
+      attentionReasons: [],
+      detectedTemplateProducts: [],
+      unsupportedClaims: [],
+    });
+    let calls = 0;
+    const service = new SubmissionService({
+      replies,
+      attempts,
+      driver: {
+        submitReply: async (_review, _reply, control) => {
+          calls += 1;
+          control.beforeSubmit();
+          return { state: "sent", evidence: "平台显示回复成功" };
+        },
+      },
+    });
+
+    await expect(service.submit(id)).resolves.toMatchObject({ outcome: "sent", state: "sent" });
+    expect(calls).toBe(1);
+    database.close();
+  });
+
+  it("blocks an after-sales promise added outside the selected merchant template", async () => {
+    const database = openDatabase(":memory:");
+    runMigrations(database);
+    const replies = new ReplyRepository(database);
+    const attempts = new ReplyAttemptRepository(database);
+    const sourceKey = "tmall:invented-after-sales-promise";
+    const template = "很抱歉没有达到您的预期，请联系在线客服协助处理。";
+    const { id } = replies.discover({
+      sourceKey,
+      orderId: null,
+      review: "这个价格不值",
+      product: "漫步者耳机",
+      reviewedAt: null,
+      sentimentLabel: "negative",
+      itemId: null,
+      reviewPhase: "initial",
+    });
+    replies.saveClassification(id, {
+      library: "bad",
+      primaryCategory: "性价比",
+      category: "性价比一般",
+      confidence: 0.95,
+      reason: "明确表达价格不值",
+      needsAttention: false,
+    });
+    database.prepare("UPDATE reply_drafts SET original_template = ?, state = 'rewriting' WHERE id = ?").run(template, id);
+    replies.complete(id, {
+      finalReply: `${template} 我们保证给您全额退款退货。`,
+      productAdjusted: false,
+      needsAttention: false,
+      notes: "模型错误新增承诺",
+      attentionReasons: [],
+      detectedTemplateProducts: [],
+      unsupportedClaims: [],
+    });
+    let calls = 0;
+    const service = new SubmissionService({
+      replies,
+      attempts,
+      driver: { submitReply: async () => { calls += 1; return { state: "sent", evidence: "" }; } },
+    });
+
+    await expect(service.submit(id)).resolves.toMatchObject({ outcome: "failed", state: "failed" });
+    expect(calls).toBe(0);
+    expect(attempts.getBySourceKey(sourceKey)?.errorMessage).toContain("未经允许");
+    database.close();
+  });
+
   it("records a verified pre-click failure as skipped and does not reopen that review", async () => {
     const database = openDatabase(":memory:");
     runMigrations(database);

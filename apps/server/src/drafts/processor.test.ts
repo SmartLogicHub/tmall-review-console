@@ -91,6 +91,63 @@ function setup(
 }
 
 describe("DraftProcessor", () => {
+  it("uses the maintained neutral wearing category and explanation when the product form is absent", async () => {
+    const client = ai({
+      library: "bad",
+      category: "入耳式佩戴",
+      confidence: 0.95,
+      reason: "商品看起来像半入耳式，佩戴导致耳朵疼",
+      needsAttention: false,
+    });
+    const { database, replies, templates, processor } = setup(client);
+    templates.activateVersion({
+      library: "bad",
+      contentHash: "bad-neutral-wearing",
+      sourceRecordCount: 4,
+      templates: [
+        {
+          primaryCategory: "佩戴体验",
+          category: "半入耳式佩戴",
+          keywords: ["半入耳式佩戴不适", "耳朵疼"],
+          replies: [{ sequence: 1, text: "半入耳专用耳塞话术" }],
+        },
+        {
+          primaryCategory: "佩戴体验",
+          category: "入耳式佩戴",
+          keywords: ["入耳式佩戴不适", "耳道疼", "耳塞胀痛", "耳朵疼"],
+          replies: [{ sequence: 1, text: "入耳专用耳塞话术" }],
+        },
+        {
+          primaryCategory: "佩戴体验",
+          category: "标题中未提及佩戴类型",
+          keywords: ["戴着耳朵疼", "夹耳", "压耳", "佩戴不适"],
+          replies: [{ sequence: 1, text: "建议您调整佩戴角度来使耳机更稳固。" }],
+        },
+        {
+          primaryCategory: "通用差评类",
+          category: "通用差评类",
+          keywords: ["一般"],
+          replies: [{ sequence: 1, text: "通用差评话术" }],
+        },
+      ],
+      warnings: [],
+    });
+
+    const result = await processor.processSnapshots([{
+      ...snapshot("unknown-form-wearing", "戴着耳朵疼"),
+      product: "漫步者Zero Air真无线蓝牙耳机降噪通话运动跑步游戏2026新款",
+      sentimentLabel: "negative",
+    }]);
+
+    expect(result).toMatchObject({ processed: 1, failed: 0, skipped: 0 });
+    expect(replies.getBySourceKey("unknown-form-wearing")).toMatchObject({
+      category: "标题中未提及佩戴类型",
+      originalTemplate: "建议您调整佩戴角度来使耳机更稳固。",
+      classificationReason: "商品标题未明确佩戴类型，评价属于佩戴问题，使用中性佩戴话术。",
+    });
+    database.close();
+  });
+
   it("skips an explicit celebrity or endorsement review before generating a reply", async () => {
     const client = ai({ library: "good", category: "通用整体好评类", confidence: 0.9, reason: "正面", needsAttention: false });
     const { database, replies, processor } = setup(client);
@@ -107,6 +164,58 @@ describe("DraftProcessor", () => {
     });
     expect(client.classifyReview).not.toHaveBeenCalled();
     expect(client.rewriteTemplate).not.toHaveBeenCalled();
+    database.close();
+  });
+
+  it("does not treat an ordinary singer metaphor as a celebrity-linked review", async () => {
+    const client = ai({ library: "good", category: "音质音效类", confidence: 0.96, reason: "称赞音质", needsAttention: false });
+    const { database, replies, processor } = setup(client);
+
+    const result = await processor.processSnapshots([
+      snapshot("ordinary-singer-metaphor", "音质清晰得仿佛歌手就在耳边低语"),
+    ]);
+
+    expect(result).toMatchObject({ processed: 1, failed: 0, skipped: 0 });
+    expect(result.items[0]).toMatchObject({ outcome: "completed", state: "read_only_ready" });
+    expect(replies.getBySourceKey("ordinary-singer-metaphor")).toMatchObject({
+      library: "good",
+      category: "音质音效类",
+      errorCode: null,
+    });
+    expect(client.classifyReview).toHaveBeenCalledOnce();
+    database.close();
+  });
+
+  it("uses the generic good-review fallback for a review containing only empty platform field labels", async () => {
+    const client = ai({ library: "bad", category: "通用差评类", confidence: 0.91, reason: "模型把空字段误判为差评", needsAttention: false });
+    const { database, replies, templates, processor } = setup(client);
+    templates.activateVersion({
+      library: "good",
+      contentHash: "good-with-platform-field-categories",
+      sourceRecordCount: 3,
+      templates: [
+        { primaryCategory: "佩戴", category: "佩戴体验类", keywords: ["佩戴感受", "佩戴舒适"], replies: [{ sequence: 1, text: "佩戴好评" }] },
+        { primaryCategory: "续航", category: "续航表现类", keywords: ["续航能力", "续航不错"], replies: [{ sequence: 1, text: "续航好评" }] },
+        { primaryCategory: "通用", category: "通用整体好评类", keywords: [], replies: [{ sequence: 1, text: "通用好评" }] },
+      ],
+      warnings: [],
+    });
+
+    const result = await processor.processSnapshots([
+      {
+        ...snapshot("empty-field-labels", "佩戴感受： 续航能力："),
+        sentimentLabel: "unknown",
+      },
+    ]);
+
+    expect(result).toMatchObject({ processed: 1, failed: 0, skipped: 0 });
+    expect(result.items[0]).toMatchObject({ outcome: "completed", state: "read_only_ready" });
+    expect(replies.getBySourceKey("empty-field-labels")).toMatchObject({
+      library: "good",
+      category: "通用整体好评类",
+      finalReply: "通用好评",
+      sentimentLabel: "positive",
+    });
     database.close();
   });
 
@@ -1668,6 +1777,48 @@ describe("DraftProcessor", () => {
     database.close();
   });
 
+  it("records an unexpected draft failure for the current review without requesting a global pause", async () => {
+    const client = ai({
+      library: "bad",
+      category: "通用差评类",
+      confidence: 0.96,
+      reason: "",
+      needsAttention: false,
+    });
+    const { database, replies, processor } = setup(client);
+
+    const result = await processor.processSnapshots([
+      snapshot("unexpected-draft-failure", "K歌收不进高音，耳返还有延迟，换了几个软件都不行"),
+    ]);
+
+    expect(result).toMatchObject({ processed: 1, failed: 1, skipped: 0 });
+    expect(result.items[0]).toMatchObject({ state: "failed", outcome: "failed_continue" });
+    expect(replies.getBySourceKey("unexpected-draft-failure")).toMatchObject({
+      state: "failed",
+      errorCode: "DRAFT_PROCESSING_FAILED",
+      errorMessage: expect.stringContaining("分类与话术结果"),
+    });
+
+    vi.mocked(client.classifyReview).mockResolvedValue({
+      library: "bad",
+      category: "通用差评类",
+      confidence: 0.96,
+      reason: "买家明确反馈 K 歌收音和耳返延迟问题",
+      needsAttention: false,
+    });
+    const repeated = await processor.processSnapshots([
+      snapshot("unexpected-draft-failure", "K歌收不进高音，耳返还有延迟，换了几个软件都不行"),
+    ]);
+
+    expect(repeated.items[0]).toMatchObject({ state: "read_only_ready", outcome: "completed" });
+    expect(replies.getBySourceKey("unexpected-draft-failure")).toMatchObject({
+      state: "read_only_ready",
+      errorCode: null,
+      errorMessage: null,
+    });
+    database.close();
+  });
+
   it("pauses for insufficient DeepSeek balance without retrying", async () => {
     const client = ai({ library: "good", category: "音质音效类", confidence: 0.96, reason: "称赞音质", needsAttention: false });
     vi.mocked(client.classifyReview).mockRejectedValue(
@@ -2400,6 +2551,61 @@ describe("DraftProcessor", () => {
     expect(attempts.getBySourceKey(input.sourceKey)).toBeNull();
     expect(client.classifyReview).toHaveBeenCalledOnce();
     expect(client.rewriteTemplate).toHaveBeenCalledOnce();
+    database.close();
+  });
+
+  it("returns an existing ready draft for submission when its validation failed before any browser click and the live row is still actionable", async () => {
+    const client = ai({ library: "good", category: "音质音效类", confidence: 0.96, reason: "称赞音质", needsAttention: false });
+    const { database, replies, processor } = setup(client);
+    const attempts = new ReplyAttemptRepository(database);
+    const input = snapshot("live-actionable-validation-failed", "音质很好");
+    const first = await processor.processSnapshots([input]);
+    const draftId = first.items[0]!.id;
+    const failedAttempt = attempts.prepareWithReplyLock(draftId, input.sourceKey).attempt;
+    attempts.markFailed(failedAttempt.id, "REPLY_VALIDATION_FAILED", "旧版误拦模板中的退款退货话术");
+    expect(replies.get(draftId)).toMatchObject({ state: "read_only_ready" });
+    expect(attempts.get(failedAttempt.id)).toMatchObject({
+      state: "failed",
+      submittedAt: null,
+      verifiedAt: null,
+    });
+    vi.mocked(client.classifyReview).mockClear();
+    vi.mocked(client.rewriteTemplate).mockClear();
+
+    const repeated = await processor.processSnapshots([{
+      ...input,
+      platformActionState: "none",
+      platformComplaintEntryState: "available",
+    }]);
+
+    expect(repeated).toMatchObject({ processed: 1, skipped: 0, failed: 0 });
+    expect(repeated.items[0]).toMatchObject({ outcome: "completed", state: "read_only_ready" });
+    expect(client.classifyReview).not.toHaveBeenCalled();
+    expect(client.rewriteTemplate).not.toHaveBeenCalled();
+    database.close();
+  });
+
+  it("does not return an existing ready draft for submission when an old failure crossed the browser click boundary", async () => {
+    const client = ai({ library: "good", category: "音质音效类", confidence: 0.96, reason: "称赞音质", needsAttention: false });
+    const { database, replies, processor } = setup(client);
+    const attempts = new ReplyAttemptRepository(database);
+    const input = snapshot("live-ready-post-click-protected", "音质很好");
+    const first = await processor.processSnapshots([input]);
+    const draftId = first.items[0]!.id;
+    const failedAttempt = attempts.prepareWithReplyLock(draftId, input.sourceKey).attempt;
+    attempts.markSubmitting(failedAttempt.id);
+    attempts.markPreSubmitFailed(failedAttempt.id, "LEGACY_POST_SUBMIT_FAILURE", "旧版本点击提交后的结果未知");
+    expect(replies.get(draftId)).toMatchObject({ state: "read_only_ready" });
+    expect(attempts.get(failedAttempt.id)?.submittedAt).not.toBeNull();
+
+    const repeated = await processor.processSnapshots([{
+      ...input,
+      platformActionState: "none",
+      platformComplaintEntryState: "available",
+    }]);
+
+    expect(repeated).toMatchObject({ processed: 0, skipped: 1, failed: 0 });
+    expect(repeated.items[0]).toMatchObject({ outcome: "skipped", state: "read_only_ready" });
     database.close();
   });
 

@@ -161,6 +161,32 @@ describe("createProductionComplaintReviewPolicy", () => {
     database.close();
   });
 
+  it("does not send an ordinary noise-cancellation complaint into complaint pre-review", async () => {
+    const database = openDatabase(":memory:");
+    runMigrations(database);
+    const complaints = new ComplaintRepository(database);
+    const analyzeComplaint = vi.fn(async () => {
+      throw new Error("ordinary feature feedback must not reach complaint AI");
+    });
+    const policy = createProductionComplaintReviewPolicy({
+      complaints,
+      complaintAutoSubmit: true,
+      analyzeComplaint,
+    });
+    const input = draft("ordinary-noise-cancellation-negative", {
+      review: "降噪效果不行，音质及续航可以。",
+      sentimentLabel: "negative",
+    });
+
+    await expect(policy.evaluate(input, { complaintEntryState: "available" })).resolves.toMatchObject({
+      action: "reply",
+      caseState: "no_complaint",
+    });
+    expect(analyzeComplaint).not.toHaveBeenCalled();
+    expect(complaints.findBySource("primary", input.sourceKey)).toBeNull();
+    database.close();
+  });
+
   it("uses contextual violation clues only to request semantic complaint analysis", async () => {
     const database = openDatabase(":memory:");
     runMigrations(database);
@@ -319,7 +345,7 @@ describe("createProductionComplaintReviewPolicy", () => {
     database.close();
   });
 
-  it("never releases a complaint that already has a validated type and submission intent", async () => {
+  it("releases a validated legacy complaint intent when the current live review is ordinary and no submit click ever started", async () => {
     const database = openDatabase(":memory:");
     runMigrations(database);
     const complaints = new ComplaintRepository(database);
@@ -356,16 +382,19 @@ describe("createProductionComplaintReviewPolicy", () => {
       review: "音质很好，佩戴舒服",
       sentimentLabel: "positive",
     }))).resolves.toMatchObject({
-      action: "manual_action_required",
+      action: "reply",
       caseId: protectedCase.id,
+      caseState: "no_complaint",
     });
     expect(complaints.findBySource("primary", candidateDraft.sourceKey)).toMatchObject({
-      state: "manual_action_required",
+      state: "no_complaint",
       complaintType: "advertising_content",
     });
     expect(new ReviewActionGate(database).getLock("primary", candidateDraft.sourceKey)).toMatchObject({
-      actionKind: "complaint",
+      actionKind: "reply",
     });
+    expect(database.prepare("SELECT state FROM complaint_attempts WHERE complaint_case_id = ?").get(protectedCase.id))
+      .toEqual({ state: "failed" });
     database.close();
   });
 

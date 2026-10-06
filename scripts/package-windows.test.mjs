@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   requiredDistributionPaths,
+  resolveLocalStateSelection,
   resolvePackageDataRootPath,
   resolveReleaseRootPath,
   shouldCopyLocalBrowserPath,
@@ -22,6 +23,17 @@ test("local-state source override stays inside the workspace", () => {
     /release-final-20260724-v4[\\/]data$/u,
   );
   assert.throws(() => resolvePackageDataRootPath("../outside-workspace"), /outside workspace/u);
+});
+
+test("cross-computer package keeps the database without copying the old browser profile", () => {
+  assert.deepEqual(resolveLocalStateSelection({ includeLocalDatabase: true }), {
+    includeDatabase: true,
+    includeBrowserProfile: false,
+  });
+  assert.deepEqual(resolveLocalStateSelection({ includeLocalState: true }), {
+    includeDatabase: true,
+    includeBrowserProfile: true,
+  });
 });
 
 test("distribution excludes credentials, browser sessions, runtime data and repository metadata", () => {
@@ -47,6 +59,7 @@ test("distribution layout contains everything the launcher validates", () => {
     "runtime/node.exe",
     "node_modules/tsx/dist/cli.mjs",
     "apps/server/src/index.ts",
+    "apps/server/resources/select-local-chrome.ps1",
     "apps/web/dist/index.html",
     "天猫评论助手.exe",
   ]);

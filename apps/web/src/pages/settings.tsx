@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Bot, CalendarClock, ChevronRight, CircleCheck, Database, KeyRound, LockKeyhole, LogIn, RefreshCw, ShieldCheck, Trash2, Wrench } from "lucide-react";
+import { AlertTriangle, Bot, CalendarClock, ChevronRight, CircleCheck, Database, KeyRound, LockKeyhole, LogIn, MonitorCog, RefreshCw, ShieldCheck, Trash2, Wrench } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch, toUserMessage } from "../api/client";
@@ -28,6 +28,16 @@ type Settings = {
   complaintAutoSubmit: boolean;
   adapters: Record<string, string>;
 };
+
+type BrowserStatus = {
+  source: "custom" | "standard" | "missing";
+  available: boolean;
+  executablePath: string | null;
+  customPath: string | null;
+  customPathValid: boolean;
+};
+
+type BrowserSelectionResult = BrowserStatus & { cancelled: boolean };
 
 type DeepSeekModelCheck =
   | { model: string; status: "ready"; latencyMs: number }
@@ -82,6 +92,7 @@ export function SettingsPage() {
   const [feishuAppId, setFeishuAppId] = useState("");
   const [feishuSecret, setFeishuSecret] = useState("");
   const auth = useQuery({ queryKey: ["tmall-auth"], queryFn: () => apiFetch<AuthStatus>("/api/tmall-auth/status") });
+  const browser = useQuery({ queryKey: ["tmall-browser"], queryFn: () => apiFetch<BrowserStatus>("/api/tmall-browser/status") });
   const shouldContinueExistingTmallSession = [
     "manual_verification_required",
     "manual_action_required",
@@ -100,6 +111,7 @@ export function SettingsPage() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["settings"] }),
       queryClient.invalidateQueries({ queryKey: ["tmall-auth"] }),
+      queryClient.invalidateQueries({ queryKey: ["tmall-browser"] }),
       queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
     ]);
   };
@@ -130,6 +142,14 @@ export function SettingsPage() {
   const testDeepSeek = useMutation({
     mutationFn: () => apiFetch<DeepSeekConnectionTest>("/api/connections/deepseek/test", { method: "POST" }),
     onSuccess: refreshAll,
+  });
+  const selectChrome = useMutation({
+    mutationFn: () => apiFetch<BrowserSelectionResult>("/api/tmall-browser/select", { method: "POST" }),
+    onSettled: refreshAll,
+  });
+  const clearCustomChrome = useMutation({
+    mutationFn: () => apiFetch<BrowserStatus>("/api/tmall-browser/custom-path", { method: "DELETE" }),
+    onSettled: refreshAll,
   });
   const saveDeepSeek = useMutation({
     mutationFn: async () => {
@@ -252,6 +272,46 @@ export function SettingsPage() {
 
         <article className="panel credential-card featured-credential">
           <CredentialHeading icon={<LogIn size={19} />} title="淘宝商家登录" subtitle="用于掉线后重新登录并进入评价管理" ready={auth.data?.state === "authenticated"} configured={auth.data?.configured} />
+          <div className={`browser-runtime-state ${browser.data?.available ? "is-ready" : "is-missing"}`}>
+            <span className="browser-runtime-icon"><MonitorCog size={18} /></span>
+            <div className="browser-runtime-copy">
+              <strong>
+                {browser.isPending
+                  ? "正在检测 Google Chrome"
+                  : browser.data?.source === "custom"
+                    ? "已使用自定义 Chrome"
+                    : browser.data?.source === "standard"
+                      ? "已自动找到 Google Chrome"
+                      : "未找到可用的 Google Chrome，请选择 chrome.exe 或 chromex.exe。"}
+              </strong>
+              {browser.data?.executablePath && <code title={browser.data.executablePath}>{browser.data.executablePath}</code>}
+              {browser.data?.customPath && !browser.data.customPathValid && (
+                <span>原自定义路径已失效，当前已自动切换；可以重新选择或恢复自动识别。</span>
+              )}
+              {!browser.data?.available && <span>选择后程序会先测试启动，验证成功才会保存。</span>}
+            </div>
+            <div className="browser-runtime-actions">
+              <button
+                className="button secondary"
+                type="button"
+                onClick={() => selectChrome.mutate()}
+                disabled={selectChrome.isPending || clearCustomChrome.isPending}
+              >
+                <MonitorCog size={15} />{selectChrome.isPending ? "正在验证 Chrome" : "选择并验证 Chrome"}
+              </button>
+              {browser.data?.customPath && (
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={() => clearCustomChrome.mutate()}
+                  disabled={selectChrome.isPending || clearCustomChrome.isPending}
+                >
+                  <RefreshCw size={15} />恢复自动识别
+                </button>
+              )}
+            </div>
+          </div>
+          <ActionError errors={[browser.error, selectChrome.error, clearCustomChrome.error]} fallback="Chrome 设置操作失败，请稍后重试" />
           <form onSubmit={submitTmall} className="credential-form" autoComplete="off">
             <label className="field full"><span>淘宝商家账号</span><div className="input-with-icon"><input aria-label="淘宝商家账号" value={account} onChange={(event) => setAccount(event.target.value)} autoComplete="off" placeholder={auth.data?.maskedAccount ?? "输入商家账号"} /><KeyRound size={17} /></div></label>
             <label className="field full"><span>淘宝商家密码</span><div className="input-with-icon"><input aria-label="淘宝商家密码" value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="new-password" placeholder={auth.data?.configured ? "已保存；需要更换时重新输入" : "输入登录密码"} /><LockKeyhole size={17} /></div></label>
@@ -259,11 +319,14 @@ export function SettingsPage() {
             {auth.data?.configured && auth.data.state !== "authenticated" && auth.data.lastFailure && (
               <div className="inline-warning auth-guidance"><AlertTriangle size={16} /><span>{auth.data.lastFailure}</span></div>
             )}
+            {auth.data?.configured && auth.data.state !== "authenticated" && !auth.data.lastFailure && (
+              <p className="auth-recheck-note">账号已保存，尚未完成淘宝页面验证。</p>
+            )}
             {shouldContinueExistingTmallSession && <p className="auth-recheck-note">完成验证码、短信验证或新手引导后，点击此按钮继续登录与页面检查。</p>}
             {(auth.data?.state === "authenticated" || saveTmall.data?.state === "authenticated" || verifyTmall.data?.state === "authenticated") && <p className="inline-success"><CircleCheck size={16} />登录已验证，可以开始处理评论。</p>}
             <div className="card-actions">
-              <button className="button primary" type="submit" disabled={!account.trim() || !password || saveTmall.isPending}><ShieldCheck size={16} />{saveTmall.isPending ? "正在验证登录" : "保存并验证登录"}</button>
-              {auth.data?.configured && <button className="button secondary" type="button" onClick={() => verifyTmall.mutate()} disabled={verifyTmall.isPending}><RefreshCw size={16} />{verifyTmall.isPending ? "正在检测淘宝窗口" : shouldContinueExistingTmallSession ? "已处理淘宝页面，重新检测" : "验证并进入评价页"}</button>}
+              <button className="button primary" type="submit" disabled={!account.trim() || !password || saveTmall.isPending || !browser.data?.available}><ShieldCheck size={16} />{saveTmall.isPending ? "正在验证登录" : "保存并验证登录"}</button>
+              {auth.data?.configured && <button className="button secondary" type="button" onClick={() => verifyTmall.mutate()} disabled={verifyTmall.isPending || !browser.data?.available}><RefreshCw size={16} />{verifyTmall.isPending ? "正在检测淘宝窗口" : shouldContinueExistingTmallSession ? "已处理淘宝页面，重新检测" : "验证并进入评价页"}</button>}
             </div>
           </form>
           {auth.data?.configured && <button className="quiet-danger" type="button" onClick={() => deleteTmall.mutate()}><Trash2 size={15} />退出并清除淘宝登录数据</button>}

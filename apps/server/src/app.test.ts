@@ -128,6 +128,7 @@ describe("formal automation API", () => {
   let runtimeReadinessGateCall: number | null;
   let deepseekClassificationFailures: number;
   let deepseekClassificationCalls: number;
+  let deepseekClassificationResolver: NonNullable<DeepSeekClientApi["classifyReview"]>;
   let deepseekSentimentAlwaysFails: boolean;
   let deepseekSentimentCalls: number;
   let deepseekSentimentResolver: NonNullable<DeepSeekClientApi["determineSentiment"]>;
@@ -140,6 +141,11 @@ describe("formal automation API", () => {
   let localPickerCloseCount: number;
   let localPickerCancel: () => Promise<void>;
   let localPickerClose: () => Promise<void>;
+  let chromePickerPick: () => Promise<{ cancelled: true } | { cancelled: false; path: string }>;
+  let chromePickerCancelCount: number;
+  let chromePickerCloseCount: number;
+  let chromeValidationPaths: string[];
+  let chromeValidationError: Error | null;
   let manualProductParser: (buffer: Buffer, filename: string) => Promise<ParsedManualProductWorkbook>;
   let now: Date;
   let database: ReturnType<typeof openDatabase>;
@@ -185,6 +191,13 @@ describe("formal automation API", () => {
     runtimeReadinessGateCall = null;
     deepseekClassificationFailures = 0;
     deepseekClassificationCalls = 0;
+    deepseekClassificationResolver = async () => ({
+      library: "good",
+      category: "通用整体好评类",
+      confidence: 0.95,
+      reason: "买家表达认可",
+      needsAttention: false,
+    });
     deepseekSentimentAlwaysFails = false;
     deepseekSentimentCalls = 0;
     deepseekSentimentResolver = async () => ({ sentiment: "positive", reason: "整体明确正面", confidence: 0.95 });
@@ -202,6 +215,11 @@ describe("formal automation API", () => {
     localPickerCloseCount = 0;
     localPickerCancel = async () => { localPickerCancelCount += 1; };
     localPickerClose = async () => { localPickerCloseCount += 1; };
+    chromePickerPick = async () => ({ cancelled: true });
+    chromePickerCancelCount = 0;
+    chromePickerCloseCount = 0;
+    chromeValidationPaths = [];
+    chromeValidationError = null;
     manualProductParser = (buffer, filename) => parseManualProductWorkbook(buffer, filename);
     complaintAutoSubmitFactoryValues = [];
     complaintDecisionResolver = async (draft) => ({
@@ -265,6 +283,28 @@ describe("formal automation API", () => {
         cancel: () => localPickerCancel(),
         close: () => localPickerClose(),
       },
+      localChromePicker: {
+        pick: () => chromePickerPick(),
+        cancel: async () => { chromePickerCancelCount += 1; },
+        close: async () => { chromePickerCloseCount += 1; },
+      },
+      chromeExecutableResolver: (customPath) => customPath
+        ? {
+            source: "custom",
+            executablePath: customPath,
+            customPath,
+            customPathValid: true,
+          }
+        : {
+            source: "standard",
+            executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            customPath: null,
+            customPathValid: false,
+          },
+      chromeExecutableLaunchVerifier: async (path) => {
+        chromeValidationPaths.push(path);
+        if (chromeValidationError) throw chromeValidationError;
+      },
       manualProductWorkbookParser: (buffer, filename) => manualProductParser(buffer, filename),
       complaintReviewPolicyFactory: ({ complaintAutoSubmit }) => {
         complaintAutoSubmitFactoryValues.push(complaintAutoSubmit);
@@ -310,13 +350,13 @@ describe("formal automation API", () => {
           }
           return await deepseekSentimentResolver(input);
         },
-        classifyReview: async () => {
+        classifyReview: async (input) => {
           deepseekClassificationCalls += 1;
           if (deepseekClassificationFailures > 0) {
             deepseekClassificationFailures -= 1;
             throw new DeepSeekTransientError("network", "temporary test network failure");
           }
-          return { library: "good", category: "通用整体好评类", confidence: 0.95, reason: "买家表达认可", needsAttention: false };
+          return await deepseekClassificationResolver(input);
         },
         rewriteTemplate: async (input) => {
           deepseekRewriteCalls += 1;
@@ -420,6 +460,7 @@ describe("formal automation API", () => {
       "/api/settings",
       "/api/storage",
       "/api/tmall-auth/status",
+      "/api/tmall-browser/status",
     ];
 
     for (const path of paths) {
@@ -431,6 +472,120 @@ describe("formal automation API", () => {
       expect(response.statusCode, path).toBe(200);
       expect(response.headers["cache-control"], path).toBe("no-store");
     }
+  });
+
+  it("selects, verifies, saves, and activates a custom Chrome executable", async () => {
+    const customPath = "D:\\Portable Chrome\\chrome.exe";
+    chromePickerPick = async () => ({ cancelled: false, path: customPath });
+    const headers = {
+      host,
+      origin,
+      "sec-fetch-site": "same-origin",
+      "x-csrf-token": csrfToken,
+      cookie: `tmall_console_session=${cookie}`,
+    };
+
+    const initial = await app.inject({
+      method: "GET",
+      url: "/api/tmall-browser/status",
+      headers: { host, cookie: `tmall_console_session=${cookie}` },
+    });
+    expect(initial.json()).toMatchObject({
+      source: "standard",
+      available: true,
+      executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    });
+
+    const selected = await app.inject({
+      method: "POST",
+      url: "/api/tmall-browser/select",
+      headers,
+    });
+    expect(selected.statusCode).toBe(200);
+    expect(selected.json()).toMatchObject({
+      cancelled: false,
+      source: "custom",
+      available: true,
+      executablePath: customPath,
+      customPath,
+      customPathValid: true,
+    });
+    expect(chromeValidationPaths).toEqual([customPath]);
+    expect(new SettingsRepository(database).get("tmall_browser_executable_path")).toBe(customPath);
+    expect(tmallCloseCount).toBe(1);
+  });
+
+  it("does not change browser settings when Chrome selection is cancelled", async () => {
+    const result = await app.inject({
+      method: "POST",
+      url: "/api/tmall-browser/select",
+      headers: {
+        host,
+        origin,
+        "sec-fetch-site": "same-origin",
+        "x-csrf-token": csrfToken,
+        cookie: `tmall_console_session=${cookie}`,
+      },
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.json()).toMatchObject({ cancelled: true, source: "standard" });
+    expect(chromeValidationPaths).toEqual([]);
+    expect(new SettingsRepository(database).get("tmall_browser_executable_path")).toBeNull();
+    expect(tmallCloseCount).toBe(0);
+  });
+
+  it("keeps the previous browser setting when the selected Chrome cannot launch", async () => {
+    const customPath = "D:\\Broken Chrome\\chrome.exe";
+    chromePickerPick = async () => ({ cancelled: false, path: customPath });
+    chromeValidationError = new Error("launch failed");
+
+    const result = await app.inject({
+      method: "POST",
+      url: "/api/tmall-browser/select",
+      headers: {
+        host,
+        origin,
+        "sec-fetch-site": "same-origin",
+        "x-csrf-token": csrfToken,
+        cookie: `tmall_console_session=${cookie}`,
+      },
+    });
+
+    expect(result.statusCode).toBe(422);
+    expect(result.json()).toMatchObject({
+      error: "chrome_executable_launch_failed",
+      detail: "选择的 Chrome 无法启动，请重新选择 chrome.exe 或 chromex.exe",
+    });
+    expect(chromeValidationPaths).toEqual([customPath]);
+    expect(new SettingsRepository(database).get("tmall_browser_executable_path")).toBeNull();
+    expect(tmallCloseCount).toBe(0);
+  });
+
+  it("clears a saved custom Chrome path and returns to automatic detection", async () => {
+    const settings = new SettingsRepository(database);
+    settings.set("tmall_browser_executable_path", "D:\\Portable Chrome\\chrome.exe");
+
+    const result = await app.inject({
+      method: "DELETE",
+      url: "/api/tmall-browser/custom-path",
+      headers: {
+        host,
+        origin,
+        "sec-fetch-site": "same-origin",
+        "x-csrf-token": csrfToken,
+        cookie: `tmall_console_session=${cookie}`,
+      },
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.json()).toMatchObject({
+      source: "standard",
+      available: true,
+      customPath: null,
+    });
+    expect(settings.get("tmall_browser_executable_path")).toBe("");
+    expect(tmallCloseCount).toBe(1);
   });
 
   it("tracks browser console sessions through protected API endpoints", async () => {
@@ -2167,6 +2322,77 @@ describe("formal automation API", () => {
       .toMatchObject({ state: "sent" });
   });
 
+  it("continues to the next live review after an unexpected draft-generation failure", async () => {
+    deepseekClassificationResolver = async (input) => input.review.includes("耳返还有延迟")
+      ? {
+          library: "bad",
+          category: "通用差评类",
+          confidence: 0.97,
+          reason: "",
+          needsAttention: false,
+        }
+      : {
+          library: "good",
+          category: "通用整体好评类",
+          confidence: 0.96,
+          reason: "买家明确认可商品",
+          needsAttention: false,
+        };
+    tmallSnapshots = [
+      {
+        sourceKey: "tmall:3309081924709003:followup",
+        orderId: "3309081924709003",
+        review: "k歌不行 收不进高音 k歌软件的耳返还有延迟 换了几个软件都不行 本来就是冲着推荐买的 失败了",
+        product: "漫步者H180Plus typec接口手机耳机有线半入耳hifi高音质运动通话",
+        reviewedAt: "2026-07-14 09:29",
+        sentimentLabel: "unknown",
+        itemId: "h180plus",
+        reviewPhase: "followup",
+      },
+      {
+        sourceKey: "tmall:next-review-after-draft-failure",
+        orderId: "next-review-after-draft-failure",
+        review: "音质很好，佩戴也很舒服",
+        product: "漫步者测试耳机",
+        reviewedAt: "2026-07-14 09:30",
+        sentimentLabel: "positive",
+        itemId: "next-review",
+        reviewPhase: "initial",
+      },
+    ];
+    const headers = { host, origin, "sec-fetch-site": "same-origin", "x-csrf-token": csrfToken, cookie: `tmall_console_session=${cookie}` };
+
+    expect((await app.inject({ method: "POST", url: "/api/automation/start-now", headers })).statusCode).toBe(200);
+    let status = { state: "running", processed: 0, succeeded: 0, failed: 0 };
+    for (let attempt = 0; attempt < 180 && status.state === "running"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      status = (await app.inject({ method: "GET", url: "/api/automation/status", headers })).json();
+    }
+
+    expect(status).toMatchObject({ state: "disabled", processed: 2, succeeded: 1, failed: 1 });
+    expect(tmallSubmitCount).toBe(1);
+    expect(new ReplyRepository(database).getBySourceKey("tmall:3309081924709003:followup")).toMatchObject({
+      state: "failed",
+      errorCode: "DRAFT_PROCESSING_FAILED",
+    });
+    expect(new ReplyRepository(database).getBySourceKey("tmall:next-review-after-draft-failure")).toMatchObject({
+      state: "sent",
+    });
+    expect(database.prepare(`
+      SELECT state, stop_reason AS stopReason, processed_count AS processed,
+        succeeded_count AS succeeded, failed_count AS failed
+      FROM automation_runs
+      ORDER BY started_at DESC
+      LIMIT 1
+    `).get()).toEqual({
+      state: "completed",
+      stopReason: "queue_empty",
+      processed: 2,
+      succeeded: 1,
+      failed: 1,
+    });
+  });
+
   it("ignores action-locked and tombstoned AI retry diagnostics without releasing their protection", async () => {
     const replies = new ReplyRepository(database);
     const gate = new ReviewActionGate(database);
@@ -3150,7 +3376,7 @@ describe("formal automation API", () => {
 
     expect(status).toMatchObject({
       state: "waiting",
-      currentStep: "专用淘宝浏览器启动失败。请确认已安装 Chrome，并关闭影刀RPA等正在调试 Chrome 的工具后重试；已安排下一次自动重试",
+      currentStep: "专用淘宝浏览器启动失败。请确认已安装 Chrome，关闭 Chrome、影刀/RPA 等占用程序；换电脑使用时请清除旧浏览器资料后重试；已安排下一次自动重试",
     });
     expect(JSON.stringify(status)).not.toMatch(/private|Bearer|secret-token|EPERM/iu);
   });
@@ -4432,6 +4658,64 @@ describe("formal automation API", () => {
       payload: { nonce: clearPrepare.json().nonce },
     });
     expect(cleared.json()).toEqual({ configured: false });
+  });
+
+  it("does not report newly saved Tmall credentials as authenticated before the page opens successfully", async () => {
+    const mutationHeaders = {
+      host,
+      origin,
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+      "x-csrf-token": csrfToken,
+      cookie: `tmall_console_session=${cookie}`,
+    };
+    const prepare = await app.inject({
+      method: "POST",
+      url: "/api/tmall-auth/credentials/prepare",
+      headers: mutationHeaders,
+      payload: { action: "replace" },
+    });
+    await app.inject({
+      method: "PUT",
+      url: "/api/tmall-auth/credentials",
+      headers: mutationHeaders,
+      payload: { nonce: prepare.json().nonce, account: "merchant-account", password: "merchant-password" },
+    });
+
+    const status = await app.inject({
+      method: "GET",
+      url: "/api/tmall-auth/status",
+      headers: { host, cookie: `tmall_console_session=${cookie}` },
+    });
+
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({ configured: true, state: "session_expired" });
+  });
+
+  it("returns an actionable safe response when the dedicated Chrome window cannot start", async () => {
+    tmallOpenError = new TmallBrowserLaunchError({
+      cause: new Error("EPERM C:\\private\\copied-profile Bearer secret-token"),
+    });
+    const headers = {
+      host,
+      origin,
+      "sec-fetch-site": "same-origin",
+      "x-csrf-token": csrfToken,
+      cookie: `tmall_console_session=${cookie}`,
+    };
+
+    const result = await app.inject({
+      method: "POST",
+      url: "/api/tmall-auth/open-review-page",
+      headers,
+    });
+
+    expect(result.statusCode).toBe(503);
+    expect(result.json()).toEqual({
+      error: "tmall_browser_launch_failed",
+      detail: "专用淘宝浏览器启动失败。请确认已安装 Chrome，关闭 Chrome、影刀/RPA 等占用程序；换电脑使用时请清除旧浏览器资料后重试",
+    });
+    expect(result.body).not.toMatch(/private|Bearer|secret-token|EPERM/iu);
   });
 
   it("reuses an authenticated browser session when saved credentials are temporarily unavailable", async () => {

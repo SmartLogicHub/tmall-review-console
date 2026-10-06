@@ -14,6 +14,7 @@
     "test:e2e": "playwright test",
     "package:windows": "npm run build && node scripts/package-windows.mjs",
     "package:windows:local": "npm run build && node scripts/package-windows.mjs --include-local-state",
+    "package:windows:transfer": "npm run build && node scripts/package-windows.mjs --include-local-database",
     "data:correct-imported-history": "node scripts/correct-imported-reply-history.mjs"
   },
   "devDependencies": {

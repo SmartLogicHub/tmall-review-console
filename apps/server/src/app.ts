@@ -64,6 +64,16 @@ import {
   type ComplaintReviewPolicy,
 } from "./complaints/complaint-review-service";
 import { UiSessionManager } from "./ui-session-manager";
+import {
+  resolveChromeExecutable,
+  TMALL_BROWSER_EXECUTABLE_PATH_SETTING_KEY,
+  verifyChromeExecutableLaunch,
+  type ChromeExecutableResolution,
+} from "./tmall/browser-executable";
+import {
+  WindowsLocalChromePicker,
+  type LocalChromePicker,
+} from "./tmall/local-chrome-picker";
 
 export interface AppOptions {
   host: string;
@@ -80,6 +90,9 @@ export interface AppOptions {
   now?: () => Date;
   importPreviewStoreOptions?: Omit<ImportPreviewStoreOptions, "now">;
   localXlsxPicker?: LocalXlsxPicker;
+  localChromePicker?: LocalChromePicker;
+  chromeExecutableResolver?: (customPath: string | null) => ChromeExecutableResolution;
+  chromeExecutableLaunchVerifier?: (path: string) => Promise<void>;
   manualProductWorkbookParser?: ManualProductImportServiceOptions["parseWorkbook"];
   /**
    * Allows the browser integration to supply the strictly scoped complaint
@@ -298,6 +311,19 @@ export function buildApp(options: AppOptions): FastifyInstance {
     now: clockNow,
   });
   const localXlsxPicker = options.localXlsxPicker ?? new WindowsLocalXlsxPicker();
+  const localChromePicker = options.localChromePicker ?? new WindowsLocalChromePicker();
+  const chromeExecutableResolver = options.chromeExecutableResolver
+    ?? ((customPath: string | null) => resolveChromeExecutable({ customPath }));
+  const chromeExecutableLaunchVerifier = options.chromeExecutableLaunchVerifier
+    ?? verifyChromeExecutableLaunch;
+  const tmallBrowserStatusView = () => {
+    const customPath = settingsRepository.get<string>(TMALL_BROWSER_EXECUTABLE_PATH_SETTING_KEY);
+    const resolution = chromeExecutableResolver(customPath);
+    return {
+      ...resolution,
+      available: resolution.executablePath !== null,
+    };
+  };
   state.services = { importPreviewStore, manualProductImportService };
   const locatorRepository = new LocatorRepository(database);
   locatorRepository.ensureDefaults();
@@ -1006,6 +1032,12 @@ export function buildApp(options: AppOptions): FastifyInstance {
           automationStatus.currentStep = "AI 暂时不可用，已安全排队，稍后自动重试";
           return "succeeded";
         }
+        if (item.outcome === "failed_continue") {
+          automationStatus.failed += 1;
+          consecutiveFailures = 0;
+          automationStatus.currentStep = "当前评价草稿生成失败，已记录原因并继续下一条";
+          return "failed";
+        }
         if (item.outcome === "manual_action_required") {
           automationStatus.failed += 1;
           automationStatus.state = "manual_action_required";
@@ -1347,7 +1379,10 @@ export function buildApp(options: AppOptions): FastifyInstance {
 
   app.addHook("preClose", async () => {
     beginAutomationShutdown();
-    await localXlsxPicker.close?.();
+    await Promise.all([
+      localXlsxPicker.close?.(),
+      localChromePicker.close?.(),
+    ]);
   });
 
   app.addHook("onClose", async () => {
@@ -2545,7 +2580,10 @@ export function buildApp(options: AppOptions): FastifyInstance {
     if (automationPromise) return reply.code(409).send({ error: "automation_running", detail: "请先停止自动回复，再恢复出厂设置" });
     try {
       clearAutomationTimer();
-      await localXlsxPicker.cancel?.();
+      await Promise.all([
+        localXlsxPicker.cancel?.(),
+        localChromePicker.cancel?.(),
+      ]);
       importPreviewStore.dispose();
       await Promise.all([
         secretStore.delete(TMALL_CREDENTIAL_KEY),
@@ -2631,14 +2669,56 @@ export function buildApp(options: AppOptions): FastifyInstance {
     audit("manual_cleanup", request.params.segment, "success");
     return { deleted, ...(cleanupScope ? { scope: cleanupScope } : {}), storage: await storageView() };
   });
+  app.get("/api/tmall-browser/status", async () => tmallBrowserStatusView());
+
+  app.post("/api/tmall-browser/select", async (_request, reply) => {
+    if (automationPromise || automationStatus.state === "running" || automationStatus.state === "stopping") {
+      return reply.code(409).send({
+        error: "automation_running",
+        detail: "请先停止自动回复，再更换 Chrome",
+      });
+    }
+    let selected;
+    try {
+      selected = await localChromePicker.pick();
+    } catch {
+      return reply.code(503).send({
+        error: "chrome_picker_unavailable",
+        detail: "无法打开 Chrome 文件选择窗口，请稍后重试",
+      });
+    }
+    if (selected.cancelled) return { cancelled: true, ...tmallBrowserStatusView() };
+    try {
+      await chromeExecutableLaunchVerifier(selected.path);
+    } catch {
+      return reply.code(422).send({
+        error: "chrome_executable_launch_failed",
+        detail: "选择的 Chrome 无法启动，请重新选择 chrome.exe 或 chromex.exe",
+      });
+    }
+    settingsRepository.set(TMALL_BROWSER_EXECUTABLE_PATH_SETTING_KEY, selected.path);
+    await tmallAuthDriver.close();
+    return { cancelled: false, ...tmallBrowserStatusView() };
+  });
+
+  app.delete("/api/tmall-browser/custom-path", async (_request, reply) => {
+    if (automationPromise || automationStatus.state === "running" || automationStatus.state === "stopping") {
+      return reply.code(409).send({
+        error: "automation_running",
+        detail: "请先停止自动回复，再恢复自动识别 Chrome",
+      });
+    }
+    settingsRepository.set(TMALL_BROWSER_EXECUTABLE_PATH_SETTING_KEY, "");
+    await tmallAuthDriver.close();
+    return tmallBrowserStatusView();
+  });
+
   app.get("/api/tmall-auth/status", async (_request, reply) => {
     try {
       const configured = await secretStore.has(TMALL_CREDENTIAL_KEY);
-      const preflight = await automationPreflight();
-      const verified = preflight.checks.find((item) => item.key === "tmall")?.ready === true;
       return {
         ...state.auth,
-        state: verified ? "authenticated" : state.auth.state === "not_configured" && configured ? "configured" : state.auth.state,
+        state: state.auth.state === "not_configured" && configured ? "configured" : state.auth.state,
         configured,
         autoReloginEnabled: configured,
         maskedAccount: state.auth.maskedAccount ?? settingsRepository.get<string>("tmall_masked_account") ?? null,
@@ -2736,6 +2816,12 @@ export function buildApp(options: AppOptions): FastifyInstance {
         return reply.code(503).send({
           error: "tmall_credentials_temporarily_unavailable",
           detail: "读取已保存的淘宝登录信息失败，请重新点击验证",
+        });
+      }
+      if (error instanceof TmallBrowserLaunchError) {
+        return reply.code(503).send({
+          error: "tmall_browser_launch_failed",
+          detail: error.message,
         });
       }
       throw error;

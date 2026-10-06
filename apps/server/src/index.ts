@@ -2,26 +2,39 @@ import { randomBytes } from "node:crypto";
 import { buildApp } from "./app";
 import { defaultBrowserProfilePath, defaultDatabasePath } from "./runtime-paths";
 import { InMemorySecretStore, WindowsCredentialStore } from "./security/credential-store";
-import { openDatabase } from "./storage/database";
+import { openDatabase, runMigrations } from "./storage/database";
+import { SettingsRepository } from "./storage/repositories";
 import { PlaywrightTmallAuthDriver } from "./tmall/auth-driver";
+import {
+  resolveChromeExecutable,
+  TMALL_BROWSER_EXECUTABLE_PATH_SETTING_KEY,
+} from "./tmall/browser-executable";
 import { bindComplaintAnalysis, createProductionComplaintReviewPolicy } from "./complaints/production-complaint-review-policy";
 import { registerStaticWeb } from "./static-web";
 import { installStdinShutdown } from "./stdin-shutdown";
 import { UiSessionManager } from "./ui-session-manager";
+import { createForegroundBrowserIdleNotifier } from "./runtime-notices";
 
 const port = Number(process.env.TMALL_CONSOLE_PORT ?? 4300);
 const host = `127.0.0.1:${port}`;
 const origin = process.env.TMALL_CONSOLE_ORIGIN ?? "http://127.0.0.1:5173";
 
 const databasePath = process.env.TMALL_CONSOLE_DATABASE_PATH ?? defaultDatabasePath();
+const database = openDatabase(databasePath);
+runMigrations(database);
+const startupSettings = new SettingsRepository(database);
 const tmallAuthDriver = new PlaywrightTmallAuthDriver({
   profileDirectory: process.env.TMALL_CONSOLE_BROWSER_PROFILE_PATH ?? defaultBrowserProfilePath(),
+  browserExecutablePath: () => resolveChromeExecutable({
+    customPath: startupSettings.get<string>(TMALL_BROWSER_EXECUTABLE_PATH_SETTING_KEY),
+  }).executablePath,
+});
+const notifyForegroundBrowserIdle = createForegroundBrowserIdleNotifier({
+  cooldownMs: 15 * 60_000,
 });
 const uiSessionManager = new UiSessionManager({
   leaseMs: 15_000,
-  onIdle: () => {
-    console.warn("Foreground browser session expired; local service remains available until the launcher is closed");
-  },
+  onIdle: notifyForegroundBrowserIdle,
 });
 
 const app = buildApp({
@@ -29,7 +42,7 @@ const app = buildApp({
         origin,
         sessionToken: randomBytes(32).toString("hex"),
         csrfToken: randomBytes(32).toString("hex"),
-        database: openDatabase(databasePath),
+        database,
         secretStore: process.env.TMALL_CONSOLE_IN_MEMORY_SECRETS === "1" ? new InMemorySecretStore() : new WindowsCredentialStore(),
         tmallAuthDriver,
         complaintReviewPolicyFactory: ({ complaints, ai, complaintAutoSubmit }) => {
